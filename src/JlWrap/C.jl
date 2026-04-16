@@ -21,6 +21,9 @@ const PYJLVALUES = []
 const PYJLFREEVALUES = Int[]
 # lock protecting PYJLVALUES and PYJLFREEVALUES from concurrent modification
 const PYJL_LOCK = Threads.SpinLock()
+# set to true by an atexit hook so _pyjl_dealloc can skip Julia runtime calls
+# (Base.GC.enable, lock) after jl_atexit_hook has torn down the runtime
+const JL_EXITING = Ref(false)
 
 function _pyjl_new(t::C.PyPtr, ::C.PyPtr, ::C.PyPtr)
     o = ccall(UnsafePtr{C.PyTypeObject}(t).alloc[!], C.PyPtr, (C.PyPtr, C.Py_ssize_t), t, 0)
@@ -32,7 +35,7 @@ end
 
 function _pyjl_dealloc(o::C.PyPtr)
     idx = UnsafePtr{PyJuliaValueObject}(o).value[]
-    if idx != 0
+    if idx != 0 && !JL_EXITING[]
         # Disable GC to prevent push! from triggering a GC that runs finalizers
         # re-entrantly (the finalizer chain: push! → alloc → GC → py_finalizer →
         # enqueue → Py_DecRef → _pyjl_dealloc → push! on same vector →
@@ -366,6 +369,9 @@ end
 
 function __init__()
     init_c()
+    atexit() do
+        JL_EXITING[] = true
+    end
 end
 
 PyJuliaValue_IsNull(o) = Base.GC.@preserve o UnsafePtr{PyJuliaValueObject}(C.asptr(o)).value[] == 0
